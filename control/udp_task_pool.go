@@ -1,11 +1,10 @@
 package control
 
 import (
+	"github.com/panjf2000/ants/v2"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/panjf2000/ants"
 )
 
 var isTest = false
