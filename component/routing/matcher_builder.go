@@ -56,16 +56,16 @@ func (b *RulesBuilder) Apply(rules []*config_parser.RoutingRule) (err error) {
 			if !ok {
 				return fmt.Errorf("unknown function: %v", f.Name)
 			}
-			paramValueGroups, keyOrder := groupParamValuesByKey(f.Params)
-			for jMatchSet, key := range keyOrder {
-				paramValueGroup := paramValueGroups[key]
+			paramValueGroups := groupParamValuesByKey(f.Params)
+			for jMatchSet, group := range paramValueGroups {
+				key := group.key
 				// Preprocess the outbound.
 				overrideOutbound := &Outbound{
 					Name: consts.OutboundLogicalOr.String(),
 					Mark: outbound.Mark,
 					Must: outbound.Must,
 				}
-				if jMatchSet == len(keyOrder)-1 {
+				if jMatchSet == len(paramValueGroups)-1 {
 					overrideOutbound.Name = consts.OutboundLogicalAnd.String()
 					if iFunc == len(rule.AndFunctions)-1 {
 						overrideOutbound.Name = outbound.Name
@@ -81,7 +81,7 @@ func (b *RulesBuilder) Apply(rules []*config_parser.RoutingRule) (err error) {
 					b.log.Debugf("\t%v%v(%v) -> %v", symNot, f.Name, key, overrideOutbound.Name)
 				}
 
-				if err = functionParser(b.log, f, key, paramValueGroup, overrideOutbound); err != nil {
+				if err = functionParser(b.log, f, key, group.values, overrideOutbound); err != nil {
 					return fmt.Errorf("failed to parse '%v': %w", f.String(false, false, false), err)
 				}
 			}
@@ -90,15 +90,44 @@ func (b *RulesBuilder) Apply(rules []*config_parser.RoutingRule) (err error) {
 	return nil
 }
 
-func groupParamValuesByKey(params []*config_parser.Param) (keyToValues map[string][]string, keyOrder []string) {
-	groups := make(map[string][]string)
-	for _, param := range params {
-		if _, ok := groups[param.Key]; !ok {
-			keyOrder = append(keyOrder, param.Key)
+type paramValueGroup struct {
+	key    string
+	values []string
+}
+
+func groupParamValuesByKey(params []*config_parser.Param) []paramValueGroup {
+	var groups []paramValueGroup
+	sorted := true
+	for i := 0; i < len(params); {
+		j := i + 1
+		for j < len(params) && params[j].Key == params[i].Key {
+			j++
 		}
-		groups[param.Key] = append(groups[param.Key], param.Val)
+		values := make([]string, j-i)
+		for k := i; k < j; k++ {
+			values[k-i] = params[k].Val
+		}
+		if len(groups) > 0 && params[i].Key < groups[len(groups)-1].key {
+			sorted = false
+		}
+		groups = append(groups, paramValueGroup{key: params[i].Key, values: values})
+		i = j
 	}
-	return groups, keyOrder
+
+	if sorted {
+		return groups
+	}
+	keyToGroup := make(map[string]int, len(groups))
+	compacted := groups[:0]
+	for _, group := range groups {
+		if i, ok := keyToGroup[group.key]; ok {
+			compacted[i].values = append(compacted[i].values, group.values...)
+			continue
+		}
+		keyToGroup[group.key] = len(compacted)
+		compacted = append(compacted, group)
+	}
+	return compacted
 }
 
 func ParseOutbound(rawOutbound *config_parser.Function) (outbound *Outbound, err error) {

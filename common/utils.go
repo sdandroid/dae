@@ -78,7 +78,7 @@ func Deduplicate(list []string) []string {
 		return nil
 	}
 	res := make([]string, 0, len(list))
-	m := make(map[string]struct{})
+	m := make(map[string]struct{}, len(list))
 	for _, v := range list {
 		if _, ok := m[v]; ok {
 			continue

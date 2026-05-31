@@ -22,11 +22,25 @@ type CompactBitList struct {
 }
 
 func NewCompactBitList(unitBitSize int) *CompactBitList {
+	return NewCompactBitListWithCapacity(unitBitSize, 0)
+}
+
+func NewCompactBitListWithCapacity(unitBitSize, unitCapacity int) *CompactBitList {
+	bufferCapacity := (unitBitSize*unitCapacity + 15) / 16
+	if bufferCapacity < 8 {
+		bufferCapacity = 8
+	}
 	return &CompactBitList{
 		unitBitSize: unitBitSize,
 		size:        0,
-		b:           anybuffer.NewBuffer[uint16](8),
+		b:           anybuffer.NewBuffer[uint16](bufferCapacity),
 	}
+}
+
+func NewCompactBitListWithSize(unitBitSize, unitSize int) *CompactBitList {
+	m := NewCompactBitListWithCapacity(unitBitSize, unitSize)
+	m.b.Extend((unitBitSize*unitSize + 15) / 16)
+	return m
 }
 
 // Set function is not optimized yet.
@@ -118,7 +132,26 @@ func (m *CompactBitList) Get(iUnit int) (v uint64) {
 }
 
 func (m *CompactBitList) Append(v uint64) {
-	m.Set(m.unitNum, v)
+	if bits.Len64(v) > m.unitBitSize {
+		panic(fmt.Sprintf("value %v exceeds unit bit size", v))
+	}
+	bitOffset := m.unitNum * m.unitBitSize
+	if bitBoundary := bitOffset + m.unitBitSize; m.b.Len()*16 < bitBoundary {
+		m.b.Extend((bitBoundary+15)/16 - m.b.Len())
+	}
+	b := m.b.Slice()
+	i := bitOffset / 16
+	j := bitOffset % 16
+	for remaining := m.unitBitSize; remaining > 0; {
+		n := common.Min(16-j, remaining)
+		mask := uint16(1<<n - 1)
+		b[i] = b[i]&^(mask<<j) | uint16(v&uint64(mask))<<j
+		v >>= n
+		remaining -= n
+		i++
+		j = 0
+	}
+	m.unitNum++
 }
 
 func (m *CompactBitList) growByUnitIndex(i int) {
@@ -132,6 +165,9 @@ func (m *CompactBitList) growByUnitIndex(i int) {
 }
 
 func (m *CompactBitList) Tighten() {
+	if m.b.Len() == m.b.Cap() {
+		return
+	}
 	a := make([]uint16, m.b.Len())
 	copy(a, m.b.Slice())
 	m.b = anybuffer.NewBufferFrom(a)

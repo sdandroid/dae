@@ -8,6 +8,7 @@ package domain_matcher
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/daeuniverse/dae/common/consts"
@@ -47,6 +48,22 @@ func (n *AhocorasickSlimtrie) AddSet(bitIndex int, patterns []string, typ consts
 	if n.err != nil {
 		return
 	}
+	switch typ {
+	case consts.RoutingDomainKey_Full:
+		n.toBuildTrie[bitIndex] = slices.Grow(n.toBuildTrie[bitIndex], len(patterns))
+	case consts.RoutingDomainKey_Suffix:
+		count := len(patterns)
+		for _, d := range patterns {
+			if !strings.HasPrefix(d, ".") {
+				count++
+			}
+		}
+		n.toBuildTrie[bitIndex] = slices.Grow(n.toBuildTrie[bitIndex], count)
+	case consts.RoutingDomainKey_Keyword:
+		n.toBuildAc[bitIndex] = slices.Grow(n.toBuildAc[bitIndex], len(patterns))
+	case consts.RoutingDomainKey_Regex:
+		n.regexp[bitIndex] = slices.Grow(n.regexp[bitIndex], len(patterns))
+	}
 nextPattern:
 	for _, d := range patterns {
 		switch typ {
@@ -57,7 +74,7 @@ nextPattern:
 					continue nextPattern
 				}
 			}
-			n.toBuildTrie[bitIndex] = append(n.toBuildTrie[bitIndex], "^"+d+"$")
+			n.toBuildTrie[bitIndex] = append(n.toBuildTrie[bitIndex], reverseWithTail(d, '^'))
 		case consts.RoutingDomainKey_Suffix:
 			for _, r := range []byte(d) {
 				if !ValidDomainChars.IsValidChar(r) {
@@ -67,13 +84,13 @@ nextPattern:
 			}
 			if strings.HasPrefix(d, ".") {
 				// abc.example.com
-				n.toBuildTrie[bitIndex] = append(n.toBuildTrie[bitIndex], d+"$")
+				n.toBuildTrie[bitIndex] = append(n.toBuildTrie[bitIndex], reverseWithTail(d, 0))
 				// cannot match example.com
 			} else {
 				// xxx.example.com
-				n.toBuildTrie[bitIndex] = append(n.toBuildTrie[bitIndex], "."+d+"$")
+				n.toBuildTrie[bitIndex] = append(n.toBuildTrie[bitIndex], reverseWithTail(d, '.'))
 				// example.com
-				n.toBuildTrie[bitIndex] = append(n.toBuildTrie[bitIndex], "^"+d+"$")
+				n.toBuildTrie[bitIndex] = append(n.toBuildTrie[bitIndex], reverseWithTail(d, '^'))
 				// cannot match abcexample.com
 			}
 		case consts.RoutingDomainKey_Keyword:
@@ -154,6 +171,21 @@ func ToSuffixTrieString(s string) string {
 	}
 	return string(b)
 }
+func reverseWithTail(s string, tail byte) string {
+	n := len(s)
+	if tail != 0 {
+		n++
+	}
+	var b strings.Builder
+	b.Grow(n)
+	for i := range s {
+		b.WriteByte(s[len(s)-i-1])
+	}
+	if tail != 0 {
+		b.WriteByte(tail)
+	}
+	return b.String()
+}
 func ToSuffixTrieStrings(s []string) []string {
 	to := make([]string, len(s))
 	for i := range s {
@@ -185,8 +217,7 @@ func (n *AhocorasickSlimtrie) Build() (err error) {
 		if len(toBuild) == 0 {
 			continue
 		}
-		toBuild = ToSuffixTrieStrings(toBuild)
-		n.trie[i], err = trie.NewTrie(toBuild, ValidDomainChars)
+		n.trie[i], err = trie.NewTrieFromOwnedKeys(toBuild, ValidDomainChars)
 		if err != nil {
 			return err
 		}

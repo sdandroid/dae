@@ -8,6 +8,7 @@ package routing
 import (
 	"fmt"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 
@@ -133,13 +134,32 @@ type DeduplicateParamsOptimizer struct {
 }
 
 func deduplicateParams(list []*config_parser.Param) []*config_parser.Param {
+	sortedSimple := true
+	for i, param := range list {
+		if param.AndFunctions != nil || i > 0 && (param.Key < list[i-1].Key || param.Key == list[i-1].Key && param.Val < list[i-1].Val) {
+			sortedSimple = false
+			break
+		}
+	}
+	if sortedSimple {
+		res := list[:0]
+		for _, param := range list {
+			if len(res) == 0 || param.Key != res[len(res)-1].Key || param.Val != res[len(res)-1].Val {
+				res = append(res, param)
+			}
+		}
+		clear(list[len(res):])
+		return res
+	}
+
 	res := make([]*config_parser.Param, 0, len(list))
-	m := make(map[string]struct{})
+	m := make(map[string]struct{}, len(list))
 	for _, v := range list {
-		if _, ok := m[v.String(true, false)]; ok {
+		key := v.String(true, false)
+		if _, ok := m[key]; ok {
 			continue
 		}
-		m[v.String(true, false)] = struct{}{}
+		m[key] = struct{}{}
 		res = append(res, v)
 	}
 	return res
@@ -157,6 +177,30 @@ func (o *DeduplicateParamsOptimizer) Optimize(rules []*config_parser.RoutingRule
 type DatReaderOptimizer struct {
 	LocationFinder *assets.LocationFinder
 	Logger         *logrus.Logger
+	Cache          *DatReaderCache
+}
+
+type DatReaderCache struct {
+	geoSite map[string][]*config_parser.Param
+	geoIp   map[string][]*config_parser.Param
+}
+
+func NewDatReaderCache() *DatReaderCache {
+	return &DatReaderCache{
+		geoSite: make(map[string][]*config_parser.Param),
+		geoIp:   make(map[string][]*config_parser.Param),
+	}
+}
+
+func (o *DatReaderOptimizer) cache() *DatReaderCache {
+	if o.Cache == nil {
+		o.Cache = NewDatReaderCache()
+	}
+	return o.Cache
+}
+
+func cloneParams(params []*config_parser.Param) []*config_parser.Param {
+	return slices.Clone(params)
 }
 
 func (o *DatReaderOptimizer) loadGeoSite(filename string, code string) (params []*config_parser.Param, err error) {
@@ -169,6 +213,10 @@ func (o *DatReaderOptimizer) loadGeoSite(filename string, code string) (params [
 		return nil, err
 	}
 	o.Logger.Debugf("Read geosite \"%v:%v\" from %v", filename, code, filePath)
+	cacheKey := filePath + "\x00" + code
+	if params, ok := o.cache().geoSite[cacheKey]; ok {
+		return cloneParams(params), nil
+	}
 	code, attr, _ := strings.Cut(code, "@")
 	geoSite, err := geodata.UnmarshalGeoSite(o.Logger, filePath, code)
 	if err != nil {
@@ -216,6 +264,7 @@ func (o *DatReaderOptimizer) loadGeoSite(filename string, code string) (params [
 			})
 		}
 	}
+	o.cache().geoSite[cacheKey] = cloneParams(params)
 	return params, nil
 }
 
@@ -229,6 +278,10 @@ func (o *DatReaderOptimizer) loadGeoIp(filename string, code string) (params []*
 		return nil, err
 	}
 	o.Logger.Debugf("Read geoip \"%v:%v\" from %v", filename, code, filePath)
+	cacheKey := filePath + "\x00" + code
+	if params, ok := o.cache().geoIp[cacheKey]; ok {
+		return cloneParams(params), nil
+	}
 	geoIp, err := geodata.UnmarshalGeoIp(o.Logger, filePath, code)
 	if err != nil {
 		return nil, err
@@ -249,6 +302,7 @@ func (o *DatReaderOptimizer) loadGeoIp(filename string, code string) (params []*
 			Val: netip.PrefixFrom(ip, int(item.Prefix)).String(),
 		})
 	}
+	o.cache().geoIp[cacheKey] = cloneParams(params)
 	return params, nil
 }
 

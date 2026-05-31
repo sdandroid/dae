@@ -354,10 +354,11 @@ func NewControlPlane(
 	}
 	// Apply rules optimizers.
 	locationFinder := assets.NewLocationFinder(externGeoDataDirs)
+	datReaderCache := routing.NewDatReaderCache()
 	var rules []*config_parser.RoutingRule
 	if rules, err = routing.ApplyRulesOptimizers(routingA.Rules,
 		&routing.AliasOptimizer{},
-		&routing.DatReaderOptimizer{Logger: log, LocationFinder: locationFinder},
+		&routing.DatReaderOptimizer{Logger: log, LocationFinder: locationFinder, Cache: datReaderCache},
 		&routing.MergeAndSortRulesOptimizer{},
 		&routing.DeduplicateParamsOptimizer{},
 	); err != nil {
@@ -418,6 +419,7 @@ func NewControlPlane(
 	dnsUpstream, err := dns.New(dnsConfig, &dns.NewOption{
 		Logger:                  log,
 		LocationFinder:          locationFinder,
+		DatReaderCache:          datReaderCache,
 		UpstreamReadyCallback:   plane.dnsUpstreamReadyCallback,
 		UpstreamResolverNetwork: common.MagicNetwork("udp", global.SoMarkFromDae, global.Mptcp),
 	})

@@ -34,11 +34,14 @@ type Dns struct {
 type NewOption struct {
 	Logger                  *logrus.Logger
 	LocationFinder          *assets.LocationFinder
+	DatReaderCache          *routing.DatReaderCache
 	UpstreamReadyCallback   func(dnsUpstream *Upstream) (err error)
 	UpstreamResolverNetwork string
 }
 
 func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
+	upstreamReadyCallback := opt.UpstreamReadyCallback
+	datReaderCache := opt.DatReaderCache
 	s = &Dns{
 		log: opt.Logger,
 		upstream2Index: map[*Upstream]int{
@@ -67,8 +70,8 @@ func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
 			Network: opt.UpstreamResolverNetwork,
 			FinishInitCallback: func(i int) func(raw *url.URL, upstream *Upstream) (err error) {
 				return func(raw *url.URL, upstream *Upstream) (err error) {
-					if opt != nil && opt.UpstreamReadyCallback != nil {
-						if err = opt.UpstreamReadyCallback(upstream); err != nil {
+					if upstreamReadyCallback != nil {
+						if err = upstreamReadyCallback(upstream); err != nil {
 							return err
 						}
 					}
@@ -88,14 +91,14 @@ func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
 	}
 	// Optimize routings.
 	if dns.Routing.Request.Rules, err = routing.ApplyRulesOptimizers(dns.Routing.Request.Rules,
-		&routing.DatReaderOptimizer{Logger: opt.Logger, LocationFinder: opt.LocationFinder},
+		&routing.DatReaderOptimizer{Logger: opt.Logger, LocationFinder: opt.LocationFinder, Cache: datReaderCache},
 		&routing.MergeAndSortRulesOptimizer{},
 		&routing.DeduplicateParamsOptimizer{},
 	); err != nil {
 		return nil, err
 	}
 	if dns.Routing.Response.Rules, err = routing.ApplyRulesOptimizers(dns.Routing.Response.Rules,
-		&routing.DatReaderOptimizer{Logger: opt.Logger, LocationFinder: opt.LocationFinder},
+		&routing.DatReaderOptimizer{Logger: opt.Logger, LocationFinder: opt.LocationFinder, Cache: datReaderCache},
 		&routing.MergeAndSortRulesOptimizer{},
 		&routing.DeduplicateParamsOptimizer{},
 	); err != nil {
@@ -119,9 +122,11 @@ func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to build DNS response routing: %w", err)
 	}
+	dns.Routing.Request.Rules = nil
+	dns.Routing.Response.Rules = nil
 	if len(dns.Upstream) == 0 {
 		// Immediately ready.
-		go opt.UpstreamReadyCallback(nil)
+		go upstreamReadyCallback(nil)
 	}
 	return s, nil
 }

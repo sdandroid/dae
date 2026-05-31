@@ -5,7 +5,10 @@
 
 package trie
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestTrie(t *testing.T) {
 	trie, err := NewTrie([]string{
@@ -122,5 +125,33 @@ func TestTrie(t *testing.T) {
 	}
 	if !(trie.HasPrefix("moc.cbatnetnoc^") == true) {
 		t.Fatal("contentabc.com")
+	}
+}
+
+func TestNewTrieDoesNotModifyKeys(t *testing.T) {
+	keys := []string{"b", "a", "b"}
+	trie, err := NewTrie(keys, NewValidChars([]byte("ab")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(keys, []string{"b", "a", "b"}) {
+		t.Fatalf("NewTrie modified input keys: %v", keys)
+	}
+	if !trie.HasPrefix("a") || !trie.HasPrefix("b") {
+		t.Fatal("NewTrie failed to preserve unique keys")
+	}
+}
+
+func TestNewTrieFromOwnedKeysReusesKeys(t *testing.T) {
+	keys := []string{"b", "a", "b"}
+	trie, err := NewTrieFromOwnedKeys(keys, NewValidChars([]byte("ab")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(keys, []string{"a", "b", ""}) {
+		t.Fatalf("NewTrieFromOwnedKeys did not reuse input keys: %v", keys)
+	}
+	if !trie.HasPrefix("a") || !trie.HasPrefix("b") {
+		t.Fatal("NewTrieFromOwnedKeys failed to preserve unique keys")
 	}
 }

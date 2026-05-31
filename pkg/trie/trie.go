@@ -12,9 +12,9 @@ import (
 	"fmt"
 	"math/bits"
 	"net/netip"
+	"slices"
 	"sort"
 
-	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/bitlist"
 	"github.com/daeuniverse/outbound/pool"
 )
@@ -125,12 +125,12 @@ loop:
 }
 
 func NewTrieFromPrefixes(cidrs []netip.Prefix) (*Trie, error) {
-	var keys []string
+	keys := make([]string, 0, len(cidrs))
 	// Convert netip.Prefix -> '0' '1' string
 	for _, prefix := range cidrs {
 		keys = append(keys, Prefix2bin128(prefix))
 	}
-	t, err := NewTrie(keys, ValidCidrChars)
+	t, err := NewTrieFromOwnedKeys(keys, ValidCidrChars)
 	if err != nil {
 		return nil, err
 	}
@@ -139,45 +139,68 @@ func NewTrieFromPrefixes(cidrs []netip.Prefix) (*Trie, error) {
 
 // NewTrie creates a new *Trie struct, from a slice of sorted strings.
 func NewTrie(keys []string, chars *ValidChars) (*Trie, error) {
+	keys = slices.Clone(keys)
+	return NewTrieFromOwnedKeys(keys, chars)
+}
+
+// NewTrieFromOwnedKeys creates a trie and may reorder keys.
+func NewTrieFromOwnedKeys(keys []string, chars *ValidChars) (*Trie, error) {
 	// Check chars.
-	keys = common.Deduplicate(keys)
 	sort.Strings(keys)
+	keys = slices.Compact(keys)
+	edgeCount := 0
+	previousKey := ""
 	for _, key := range keys {
 		for _, c := range []byte(key) {
 			if !chars.IsValidChar(c) {
 				return nil, fmt.Errorf("char out of range: %c", c)
 			}
 		}
+		commonPrefixLength := 0
+		for commonPrefixLength < len(previousKey) &&
+			commonPrefixLength < len(key) &&
+			previousKey[commonPrefixLength] == key[commonPrefixLength] {
+			commonPrefixLength++
+		}
+		edgeCount += len(key) - commonPrefixLength
+		previousKey = key
+	}
+	if uint64(edgeCount) > uint64(^uint32(0)) || uint64(len(keys)) > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("trie is too large")
 	}
 
 	ss := &Trie{
-		chars:  chars,
-		labels: bitlist.NewCompactBitList(bits.Len(uint(chars.Size()))),
+		chars:       chars,
+		labels:      bitlist.NewCompactBitListWithSize(bits.Len(uint(chars.Size())), edgeCount),
+		leaves:      make([]uint64, 0, (edgeCount+1+63)/64),
+		labelBitmap: make([]uint64, 0, (2*edgeCount+1+63)/64),
 	}
 	lIdx := 0
 
-	type qElt struct{ s, e, col int }
+	type qElt struct{ s, e, col uint32 }
 
-	queue := []qElt{{0, len(keys), 0}}
+	queue := make([]qElt, 1, edgeCount+1)
+	queue[0] = qElt{0, uint32(len(keys)), 0}
 
 	for i := 0; i < len(queue); i++ {
 		elt := queue[i]
+		s, e, col := int(elt.s), int(elt.e), int(elt.col)
 
-		if elt.col == len(keys[elt.s]) {
+		if col == len(keys[s]) {
 			// a leaf node
-			elt.s++
+			s++
 			setBit(&ss.leaves, i, 1)
 		}
 
-		for j := elt.s; j < elt.e; {
+		for j := s; j < e; {
 
 			frm := j
 
-			for ; j < elt.e && keys[j][elt.col] == keys[frm][elt.col]; j++ {
+			for ; j < e && keys[j][col] == keys[frm][col]; j++ {
 			}
 
-			queue = append(queue, qElt{frm, j, elt.col + 1})
-			ss.labels.Append(uint64(chars.table[keys[frm][elt.col]]))
+			queue = append(queue, qElt{uint32(frm), uint32(j), elt.col + 1})
+			ss.labels.Append(uint64(chars.table[keys[frm][col]]))
 			setBit(&ss.labelBitmap, lIdx, 0)
 			lIdx++
 		}
@@ -191,16 +214,20 @@ func NewTrie(keys []string, chars *ValidChars) (*Trie, error) {
 	// Tighten.
 	ss.labels.Tighten()
 
-	leaves := make([]uint64, len(ss.leaves))
-	copy(leaves, ss.leaves)
-	ss.leaves = leaves
+	if len(ss.leaves) != cap(ss.leaves) {
+		leaves := make([]uint64, len(ss.leaves))
+		copy(leaves, ss.leaves)
+		ss.leaves = leaves
+	}
 
-	labelBitmap := make([]uint64, len(ss.labelBitmap))
-	copy(labelBitmap, ss.labelBitmap)
-	ss.labelBitmap = labelBitmap
+	if len(ss.labelBitmap) != cap(ss.labelBitmap) {
+		labelBitmap := make([]uint64, len(ss.labelBitmap))
+		copy(labelBitmap, ss.labelBitmap)
+		ss.labelBitmap = labelBitmap
+	}
 
-	ss.ranksBL = bitlist.NewCompactBitList(bits.Len64(uint64(ss.ranks[len(ss.ranks)-1])))
-	ss.selectsBL = bitlist.NewCompactBitList(bits.Len64(uint64(ss.selects[len(ss.selects)-1])))
+	ss.ranksBL = bitlist.NewCompactBitListWithSize(bits.Len64(uint64(ss.ranks[len(ss.ranks)-1])), len(ss.ranks))
+	ss.selectsBL = bitlist.NewCompactBitListWithSize(bits.Len64(uint64(ss.selects[len(ss.selects)-1])), len(ss.selects))
 	for _, v := range ss.ranks {
 		ss.ranksBL.Append(uint64(v))
 	}
@@ -261,13 +288,13 @@ func getBit(bm []uint64, i int) uint64 {
 
 // init builds pre-calculated cache to speed up rank() and select()
 func (ss *Trie) init() {
-	ss.ranks = []int32{0}
+	ss.ranks = make([]int32, 1, len(ss.labelBitmap)+1)
 	for i := 0; i < len(ss.labelBitmap); i++ {
 		n := bits.OnesCount64(ss.labelBitmap[i])
 		ss.ranks = append(ss.ranks, ss.ranks[len(ss.ranks)-1]+int32(n))
 	}
 
-	ss.selects = []int32{}
+	ss.selects = make([]int32, 0, (int(ss.ranks[len(ss.ranks)-1])+63)/64)
 	n := 0
 	for i := 0; i < len(ss.labelBitmap)<<6; i++ {
 		z := int(ss.labelBitmap[i>>6]>>uint(i&63)) & 1
